@@ -130,10 +130,16 @@ fn run_bench(
     } else {
         valgrind_without_aslr(arch)
     };
+
+    // https://github.com/bheisler/iai/issues/34
+    #[cfg(feature = "old_cache_sim")]
+    let cache_sim_arg = "--cache-sim=yes";
+    #[cfg(not(feature = "old_cache_sim"))]
+    let cache_sim_arg = "--cache-sim=no";
+
     let status = cmd
         .arg("--tool=cachegrind")
-        // https://github.com/bheisler/iai/issues/34
-        .arg("--cache-sim=yes")
+        .arg(cache_sim_arg)
         // Set some reasonable cache sizes. The exact sizes matter less than having fixed sizes,
         // since otherwise cachegrind would take them from the CPU and make benchmark runs
         // even more incomparable between machines.
@@ -194,13 +200,17 @@ fn parse_cachegrind_output(file: &Path) -> CachegrindStats {
 
             CachegrindStats {
                 instruction_reads: events["Ir"],
-                instruction_l1_misses: events["I1mr"],
-                instruction_cache_misses: events["ILmr"],
+                #[cfg(feature = "old_cache_sim")]
                 data_reads: events["Dr"],
+                #[cfg(feature = "old_cache_sim")]
                 data_l1_read_misses: events["D1mr"],
+                #[cfg(feature = "old_cache_sim")]
                 data_cache_read_misses: events["DLmr"],
+                #[cfg(feature = "old_cache_sim")]
                 data_writes: events["Dw"],
+                #[cfg(feature = "old_cache_sim")]
                 data_l1_write_misses: events["D1mw"],
+                #[cfg(feature = "old_cache_sim")]
                 data_cache_write_misses: events["DLmw"],
             }
         }
@@ -211,23 +221,28 @@ fn parse_cachegrind_output(file: &Path) -> CachegrindStats {
 #[derive(Clone, Debug)]
 struct CachegrindStats {
     instruction_reads: u64,
-    instruction_l1_misses: u64,
-    instruction_cache_misses: u64,
+    #[cfg(feature = "old_cache_sim")]
     data_reads: u64,
+    #[cfg(feature = "old_cache_sim")]
     data_l1_read_misses: u64,
+    #[cfg(feature = "old_cache_sim")]
     data_cache_read_misses: u64,
+    #[cfg(feature = "old_cache_sim")]
     data_writes: u64,
+    #[cfg(feature = "old_cache_sim")]
     data_l1_write_misses: u64,
+    #[cfg(feature = "old_cache_sim")]
     data_cache_write_misses: u64,
 }
 impl CachegrindStats {
+    #[cfg(feature = "old_cache_sim")]
     pub fn ram_accesses(&self) -> u64 {
-        self.instruction_cache_misses + self.data_cache_read_misses + self.data_cache_write_misses
+        self.data_cache_read_misses + self.data_cache_write_misses
     }
+    #[cfg(feature = "old_cache_sim")]
     pub fn summarize(&self) -> CachegrindSummary {
         let ram_hits = self.ram_accesses();
-        let l3_accesses =
-            self.instruction_l1_misses + self.data_l1_read_misses + self.data_l1_write_misses;
+        let l3_accesses = self.data_l1_read_misses + self.data_l1_write_misses;
         let l3_hits = l3_accesses - ram_hits;
 
         let total_memory_rw = self.instruction_reads + self.data_reads + self.data_writes;
@@ -240,31 +255,37 @@ impl CachegrindStats {
         }
     }
 
+
     #[rustfmt::skip]
     pub fn subtract(&self, calibration: &CachegrindStats) -> CachegrindStats {
         CachegrindStats {
             instruction_reads: self.instruction_reads.saturating_sub(calibration.instruction_reads),
-            instruction_l1_misses: self.instruction_l1_misses.saturating_sub(calibration.instruction_l1_misses),
-            instruction_cache_misses: self.instruction_cache_misses.saturating_sub(calibration.instruction_cache_misses),
+            #[cfg(feature = "old_cache_sim")]
             data_reads: self.data_reads.saturating_sub(calibration.data_reads),
+            #[cfg(feature = "old_cache_sim")]
             data_l1_read_misses: self.data_l1_read_misses.saturating_sub(calibration.data_l1_read_misses),
+            #[cfg(feature = "old_cache_sim")]
             data_cache_read_misses: self.data_cache_read_misses.saturating_sub(calibration.data_cache_read_misses),
+            #[cfg(feature = "old_cache_sim")]
             data_writes: self.data_writes.saturating_sub(calibration.data_writes),
+            #[cfg(feature = "old_cache_sim")]
             data_l1_write_misses: self.data_l1_write_misses.saturating_sub(calibration.data_l1_write_misses),
+            #[cfg(feature = "old_cache_sim")]
             data_cache_write_misses: self.data_cache_write_misses.saturating_sub(calibration.data_cache_write_misses),
         }
     }
 }
 
+#[cfg(feature = "old_cache_sim")]
 #[derive(Clone, Debug)]
 struct CachegrindSummary {
     l1_hits: u64,
     l3_hits: u64,
     ram_hits: u64,
 }
+#[cfg(feature = "old_cache_sim")]
 impl CachegrindSummary {
     fn cycles(&self) -> u64 {
-        // Uses Itamar Turner-Trauring's formula from https://pythonspeed.com/articles/consistent-benchmarking-in-ci/
         self.l1_hits + (5 * self.l3_hits) + (35 * self.ram_hits)
     }
 }
@@ -359,40 +380,45 @@ pub fn runner(benches: &[&(&'static str, fn())]) {
                 None => "".to_owned(),
             }
         );
-        let summary = stats.summarize();
-        let old_summary = old_stats.map(|stat| stat.summarize());
-        println!(
-            "  L1 Accesses:      {:>15}{}",
-            summary.l1_hits,
-            match &old_summary {
-                Some(old) => percentage_diff(summary.l1_hits, old.l1_hits),
-                None => "".to_owned(),
-            }
-        );
-        println!(
-            "  L2 Accesses:      {:>15}{}",
-            summary.l3_hits,
-            match &old_summary {
-                Some(old) => percentage_diff(summary.l3_hits, old.l3_hits),
-                None => "".to_owned(),
-            }
-        );
-        println!(
-            "  RAM Accesses:     {:>15}{}",
-            summary.ram_hits,
-            match &old_summary {
-                Some(old) => percentage_diff(summary.ram_hits, old.ram_hits),
-                None => "".to_owned(),
-            }
-        );
-        println!(
-            "  Estimated Cycles: {:>15}{}",
-            summary.cycles(),
-            match &old_summary {
-                Some(old) => percentage_diff(summary.cycles(), old.cycles()),
-                None => "".to_owned(),
-            }
-        );
+        #[cfg(feature = "old_cache_sim")]
+        {
+            let summary = stats.summarize();
+            let old_summary = old_stats.map(|stat| stat.summarize());
+            println!(
+                "  L1 Accesses:      {:>15}{}",
+                summary.l1_hits,
+                match &old_summary {
+                    Some(old) => percentage_diff(summary.l1_hits, old.l1_hits),
+                    None => "".to_owned(),
+                }
+            );
+            println!(
+                "  L2 Accesses:      {:>15}{}",
+                summary.l3_hits,
+                match &old_summary {
+                    Some(old) => percentage_diff(summary.l3_hits, old.l3_hits),
+                    None => "".to_owned(),
+                }
+            );
+
+            println!(
+                "  RAM Accesses:     {:>15}{}",
+                summary.ram_hits,
+                match &old_summary {
+                    Some(old) => percentage_diff(summary.ram_hits, old.ram_hits),
+                    None => "".to_owned(),
+                }
+            );
+            println!(
+                "  Estimated Cycles: {:>15}{}",
+                summary.cycles(),
+                match &old_summary {
+                    Some(old) => percentage_diff(summary.cycles(), old.cycles()),
+                    None => "".to_owned(),
+                }
+            );
+        }
+
         println!();
     }
 }
